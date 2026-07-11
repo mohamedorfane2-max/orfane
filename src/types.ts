@@ -9,6 +9,7 @@ export interface Lead {
   notes: string;
   status: 'جديد' | 'تم الاتصال' | 'مؤكد' | 'ملغي';
   createdAt: string;
+  sheetSynced?: boolean;
 }
 
 export interface TableVariation {

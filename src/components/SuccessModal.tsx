@@ -5,10 +5,30 @@ interface SuccessModalProps {
   isOpen: boolean;
   onClose: () => void;
   customerName: string;
+  whatsappNumber?: string;
+  tableType?: string;
+  quantity?: number;
+  price?: number;
 }
 
-export default function SuccessModal({ isOpen, onClose, customerName }: SuccessModalProps) {
+export default function SuccessModal({ 
+  isOpen, 
+  onClose, 
+  customerName,
+  whatsappNumber = '212600000000',
+  tableType = '',
+  quantity = 1,
+  price = 199
+}: SuccessModalProps) {
   if (!isOpen) return null;
+
+  const cleanPhone = whatsappNumber.trim().replace(/[\s+()]/g, '');
+  const formattedWhatsapp = cleanPhone.startsWith('0') 
+    ? '212' + cleanPhone.substring(1) 
+    : cleanPhone;
+
+  const messageText = `السلام عليكم، أنا ${customerName}. قمت للتو بطلب طاولة ميني MDF بلون "${tableType}" (الكمية: ${quantity})، بمبلغ إجمالي قدره ${quantity * price} درهم. أريد تأكيد وتسريع الطلب ديالي من فضلكم.`;
+  const whatsappUrl = `https://wa.me/${formattedWhatsapp}?text=${encodeURIComponent(messageText)}`;
 
   return (
     <AnimatePresence>
@@ -69,22 +89,14 @@ export default function SuccessModal({ isOpen, onClose, customerName }: SuccessM
           </div>
 
           {/* Action Buttons */}
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 pt-2">
             <button
               onClick={onClose}
-              className="w-full rounded-xl bg-natural-dark py-3 px-4 font-semibold text-white hover:bg-natural-primary transition-colors duration-200 cursor-pointer shadow-sm text-sm"
+              className="w-full rounded-xl bg-natural-primary hover:bg-natural-primary-dark py-3.5 px-4 font-black text-white transition-all duration-200 cursor-pointer shadow-md hover:shadow-lg text-sm"
+              id="close-success-modal-btn"
             >
-              مفهوم، شكراً
+              مفهوم، شكراً جزبلاً! 👍
             </button>
-            <a
-              href="https://wa.me/212600000000?text=سلام%20عليكم%20لقد%20قمت%20بطلب%20طاولة%20MDF%20صغيرة%20وأريد%20تسريع%20الطلب"
-              target="_blank"
-              referrerPolicy="no-referrer"
-              className="w-full rounded-xl bg-emerald-600 py-3 px-4 font-semibold text-white hover:bg-emerald-700 transition-colors duration-200 cursor-pointer shadow-sm text-sm flex items-center justify-center gap-2"
-            >
-              <PhoneCall className="h-4 w-4" />
-              تواصل معنا في الواتساب لتسريع الطلب
-            </a>
           </div>
         </motion.div>
       </div>

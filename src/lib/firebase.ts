@@ -1,5 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getFirestore, initializeFirestore } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
 
 const firebaseConfig = {
   projectId: "gen-lang-client-0974418377",
@@ -17,3 +18,5 @@ const databaseId = "ai-studio-mdftableslanding-f699cb71-2622-4e1e-9fac-465843740
 export const db = initializeFirestore(app, {
   experimentalAutoDetectLongPolling: true,
 }, databaseId);
+
+export const auth = getAuth(app);

@@ -20,7 +20,7 @@ import SuccessModal from './SuccessModal';
 import { getSettings, addLead } from '../lib/storage';
 
 interface LandingPageProps {
-  onAdminAccess: () => void;
+  onAdminAccess: (mode: 'orders' | 'settings') => void;
 }
 
 export default function LandingPage({ onAdminAccess }: LandingPageProps) {
@@ -41,6 +41,8 @@ export default function LandingPage({ onAdminAccess }: LandingPageProps) {
     price: 199,
     originalPrice: 299,
     whatsappNumber: '212600000000',
+    notificationWhatsapp: '212636415659',
+    enableAutoRedirect: true,
     image_natural: '/src/assets/images/table_colors_1783722948300.jpg',
     image_dark: '/src/assets/images/hero_table_1783722935630.jpg',
     image_white: '/src/assets/images/table_utility_1783722963162.jpg',
@@ -83,9 +85,16 @@ export default function LandingPage({ onAdminAccess }: LandingPageProps) {
     };
     fetchSettings();
 
-    // Check for secret admin query or hash in URL (?admin=true or #admin)
+    // Check for secret admin query or hash in URL (?admin=true, ?orders=true, ?settings=true, #admin, #orders, #settings)
     const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.get('admin') === 'true' || window.location.hash === '#admin') {
+    if (
+      urlParams.get('admin') === 'true' || 
+      urlParams.get('orders') === 'true' || 
+      urlParams.get('settings') === 'true' || 
+      window.location.hash === '#admin' || 
+      window.location.hash === '#orders' || 
+      window.location.hash === '#settings'
+    ) {
       setShowAdminPasscodeModal(true);
     }
   }, []);
@@ -103,6 +112,8 @@ export default function LandingPage({ onAdminAccess }: LandingPageProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
   const [orderName, setOrderName] = useState('');
+  const [submittedTableType, setSubmittedTableType] = useState('');
+  const [submittedQuantity, setSubmittedQuantity] = useState(1);
   const [formError, setFormError] = useState<string | null>(null);
 
   // Admin access passcode state
@@ -186,6 +197,9 @@ export default function LandingPage({ onAdminAccess }: LandingPageProps) {
       });
 
       setOrderName(fullName);
+      const tableColorStr = colors[selectedColor as keyof typeof colors] || '';
+      setSubmittedTableType(tableColorStr);
+      setSubmittedQuantity(quantity);
       setShowSuccess(true);
       
       // Reset form
@@ -204,11 +218,17 @@ export default function LandingPage({ onAdminAccess }: LandingPageProps) {
 
   const handleAdminAccess = (e: React.FormEvent) => {
     e.preventDefault();
-    if (passcode === 'OR2002fane') {
+    const cleanPass = passcode.trim();
+    if (cleanPass === 'homedecorstore') {
       setShowAdminPasscodeModal(false);
       setPasscode('');
       setPasscodeError('');
-      onAdminAccess();
+      onAdminAccess('orders');
+    } else if (cleanPass === 'OR2002fane') {
+      setShowAdminPasscodeModal(false);
+      setPasscode('');
+      setPasscodeError('');
+      onAdminAccess('settings');
     } else {
       setPasscodeError('رقم السري خاطئ! المرجو المحاولة مجددا.');
     }
@@ -394,7 +414,7 @@ export default function LandingPage({ onAdminAccess }: LandingPageProps) {
                 </button>
                 
                 <a
-                  href={`https://wa.me/${settings.whatsappNumber}?text=السلام%20عليكم،%20بغيت%20نسول%20على%20طاولة%20ميني%20MDF`}
+                  href={`https://wa.me/${settings.whatsappNumber}?text=${encodeURIComponent(`السلام عليكم، بغيت نسول على طاولة ميني MDF بلون ${colors[selectedColor as keyof typeof colors]}`)}`}
                   target="_blank"
                   referrerPolicy="no-referrer"
                   className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-base px-6 py-4.5 rounded-2xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
@@ -1114,7 +1134,7 @@ export default function LandingPage({ onAdminAccess }: LandingPageProps) {
 
       {/* Floating direct WhatsApp Call To Action in lower right screen corner */}
       <a
-        href={`https://wa.me/${settings.whatsappNumber}?text=سلام%20عليكم%20أريد%20طلب%20طاولة%20MDF%20ميني%20بـ%20${settings.price}%20درهم`}
+        href={`https://wa.me/${settings.whatsappNumber}?text=${encodeURIComponent(`سلام عليكم أريد طلب طاولة MDF ميني بلون ${colors[selectedColor as keyof typeof colors]} بـ ${settings.price} درهم`)}`}
         target="_blank"
         referrerPolicy="no-referrer"
         className="fixed bottom-6 right-6 z-50 bg-emerald-600 hover:bg-emerald-700 text-white h-14 w-14 md:h-16 md:w-16 rounded-full flex items-center justify-center shadow-2xl hover:scale-105 transition-transform duration-200 cursor-pointer"
@@ -1158,6 +1178,10 @@ export default function LandingPage({ onAdminAccess }: LandingPageProps) {
         isOpen={showSuccess}
         onClose={() => setShowSuccess(false)}
         customerName={orderName}
+        whatsappNumber={settings.notificationWhatsapp || settings.whatsappNumber}
+        tableType={submittedTableType}
+        quantity={submittedQuantity}
+        price={settings.price}
       />
 
       {/* Admin Passcode Modals Popup */}

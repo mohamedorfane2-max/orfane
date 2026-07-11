@@ -1,6 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Lead } from '../types';
-import { getLeads, getSettings, saveSettings as saveLocalSettings, updateLeadStatus, deleteLead as deleteLocalLead, subscribeLeads } from '../lib/storage';
+import { getLeads, getSettings, saveSettings as saveLocalSettings, updateLeadStatus, deleteLead as deleteLocalLead, subscribeLeads, markLeadAsSynced, markMultipleLeadsAsSynced } from '../lib/storage';
+import { 
+  initAuth as initSheetsAuth, 
+  googleSignIn as sheetsGoogleSignIn, 
+  logout as sheetsLogout, 
+  createSpreadsheet, 
+  appendRowsToSpreadsheet 
+} from '../lib/sheets';
 import { 
   Phone, 
   MessageSquare, 
@@ -25,9 +32,10 @@ import {
   Check,
   Globe,
   RefreshCw,
-  Upload
+  Upload,
+  X
 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 
 interface ImageUploaderProps {
   value: string;
@@ -177,9 +185,10 @@ function ImageUploader({ value, onChange, label }: ImageUploaderProps) {
 
 interface AdminPanelProps {
   onBack: () => void;
+  mode?: 'orders' | 'settings';
 }
 
-export default function AdminPanel({ onBack }: AdminPanelProps) {
+export default function AdminPanel({ onBack, mode = 'orders' }: AdminPanelProps) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -188,8 +197,46 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
 
+  const isInitialLoad = React.useRef(true);
+  const previousLeadsCount = React.useRef(0);
+  const [newOrderAlert, setNewOrderAlert] = useState<Lead | null>(null);
+
+  const playNotificationSound = () => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      
+      // First note
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      osc1.type = 'sine';
+      osc1.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+      gain1.gain.setValueAtTime(0.08, ctx.currentTime);
+      gain1.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+      osc1.connect(gain1);
+      gain1.connect(ctx.destination);
+      osc1.start();
+      osc1.stop(ctx.currentTime + 0.35);
+      
+      // Second note, slightly delayed
+      setTimeout(() => {
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.type = 'sine';
+        osc2.frequency.setValueAtTime(880, ctx.currentTime); // A5
+        gain2.gain.setValueAtTime(0.08, ctx.currentTime);
+        gain2.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.45);
+        osc2.connect(gain2);
+        gain2.connect(ctx.destination);
+        osc2.start();
+        osc2.stop(ctx.currentTime + 0.45);
+      }, 120);
+    } catch (e) {
+      console.error('AudioContext error:', e);
+    }
+  };
+
   // Active Tab state: 'orders' or 'settings'
-  const [activeTab, setActiveTab] = useState<'orders' | 'settings'>('orders');
+  const [activeTab, setActiveTab] = useState<'orders' | 'settings'>(mode);
 
   // Product settings state
   const [settings, setSettings] = useState({
@@ -199,6 +246,11 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
     price: 199,
     originalPrice: 299,
     whatsappNumber: "212600000000",
+    notificationWhatsapp: "212636415659",
+    enableAutoRedirect: true,
+    spreadsheetId: "",
+    spreadsheetName: "",
+    spreadsheetUrl: "",
     image_natural: "/src/assets/images/table_colors_1783722948300.jpg",
     image_dark: "/src/assets/images/hero_table_1783722935630.jpg",
     image_white: "/src/assets/images/table_utility_1783722963162.jpg",
@@ -206,6 +258,14 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
     image_features: "/src/assets/images/regenerated_image_1783728417810.png",
     image_dimensions: "/src/assets/images/table_dimensions_1783724171797.jpg"
   });
+  
+  // Google Sheets integration state
+  const [googleUser, setGoogleUser] = useState<any>(null);
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const [isSheetsAuthLoading, setIsSheetsAuthLoading] = useState(false);
+  const [isSyncingSheets, setIsSyncingSheets] = useState(false);
+  const [syncStatusMsg, setSyncStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -245,8 +305,23 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
     setLoading(true);
     const unsubscribe = subscribeLeads(
       (data) => {
-        setLeads(data);
-        setLoading(false);
+        if (isInitialLoad.current) {
+          setLeads(data);
+          previousLeadsCount.current = data.length;
+          isInitialLoad.current = false;
+          setLoading(false);
+        } else {
+          if (data.length > previousLeadsCount.current) {
+            const latestNewLead = data[0];
+            if (latestNewLead && latestNewLead.status === 'جديد') {
+              setNewOrderAlert(latestNewLead);
+              playNotificationSound();
+            }
+          }
+          setLeads(data);
+          previousLeadsCount.current = data.length;
+          setLoading(false);
+        }
       },
       (err) => {
         console.error(err);
@@ -255,7 +330,21 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
       }
     );
 
-    return () => unsubscribe();
+    const sheetsAuthUnsubscribe = initSheetsAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setGoogleToken(token);
+      },
+      () => {
+        setGoogleUser(null);
+        setGoogleToken(null);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+      sheetsAuthUnsubscribe();
+    };
   }, []);
 
   // Save product settings
@@ -275,6 +364,144 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
       setSaveError(err.message || 'حدث خطأ أثناء حفظ التعديلات');
     } finally {
       setSettingsLoading(false);
+    }
+  };
+
+  // Google Sheets Helper Functions
+  const syncLeadsToGoogleSheets = async (targetToken?: string) => {
+    const token = targetToken || googleToken;
+    if (!token) {
+      setSyncStatusMsg({ type: 'error', text: 'المرجو ربط حساب Google أولاً لتتمكن من المزامنة.' });
+      return;
+    }
+
+    const currentSpreadsheetId = settings.spreadsheetId;
+    if (!currentSpreadsheetId) {
+      setSyncStatusMsg({ type: 'error', text: 'المرجو إنشاء أو ربط جدول بيانات (Spreadsheet) أولاً.' });
+      return;
+    }
+
+    setIsSyncingSheets(true);
+    setSyncStatusMsg(null);
+
+    try {
+      // Filter out leads that are already marked as synced
+      const unsyncedLeads = leads.filter(l => !l.sheetSynced);
+
+      if (unsyncedLeads.length === 0) {
+        setSyncStatusMsg({ type: 'success', text: 'جميع الطلبات الحالية متزامنة بالفعل مع Google Sheets! ✨' });
+        setIsSyncingSheets(false);
+        return;
+      }
+
+      // Format the data as row arrays
+      const rows = unsyncedLeads.map(lead => [
+        lead.id,
+        lead.name,
+        lead.phone,
+        lead.city,
+        lead.address,
+        lead.tableType,
+        lead.quantity,
+        lead.quantity * settings.price,
+        lead.status,
+        new Date(lead.createdAt).toLocaleString('fr-FR')
+      ]);
+
+      await appendRowsToSpreadsheet(token, currentSpreadsheetId, 'الطلبات!A2', rows);
+
+      // Update the status in Firestore
+      const unsyncedIds = unsyncedLeads.map(l => l.id);
+      await markMultipleLeadsAsSynced(unsyncedIds);
+
+      setSyncStatusMsg({ 
+        type: 'success', 
+        text: `تمت بنجاح مزامنة ${unsyncedLeads.length} طلبات جديدة مع Google Sheets! 🚀` 
+      });
+    } catch (err: any) {
+      console.error('Error syncing to Google Sheets:', err);
+      setSyncStatusMsg({ 
+        type: 'error', 
+        text: `فشلت المزامنة: ${err.message || 'خطأ غير معروف'}` 
+      });
+    } finally {
+      setIsSyncingSheets(false);
+    }
+  };
+
+  const handleCreateNewSpreadsheet = async () => {
+    if (!googleToken) {
+      setSyncStatusMsg({ type: 'error', text: 'المرجو ربط حساب Google أولاً.' });
+      return;
+    }
+
+    setIsSheetsAuthLoading(true);
+    setSyncStatusMsg(null);
+
+    try {
+      const sheetTitle = `مبيعات طاولة ميني MDF - ${settings.storeName || 'بيتك ديكور'}`;
+      const result = await createSpreadsheet(googleToken, sheetTitle);
+
+      const updatedSettings = {
+        ...settings,
+        spreadsheetId: result.id,
+        spreadsheetName: sheetTitle,
+        spreadsheetUrl: result.url
+      };
+
+      setSettings(updatedSettings);
+      await saveLocalSettings(updatedSettings);
+
+      setSyncStatusMsg({ 
+        type: 'success', 
+        text: 'تم إنشاء جدول بيانات جديد بنجاح وربطه بالمتجر! 🎉' 
+      });
+    } catch (err: any) {
+      console.error('Error creating spreadsheet:', err);
+      setSyncStatusMsg({ 
+        type: 'error', 
+        text: `فشل إنشاء جدول البيانات: ${err.message || 'خطأ غير معروف'}` 
+      });
+    } finally {
+      setIsSheetsAuthLoading(false);
+    }
+  };
+
+  const handleConnectGoogle = async () => {
+    setIsSheetsAuthLoading(true);
+    setSyncStatusMsg(null);
+    try {
+      const result = await sheetsGoogleSignIn();
+      if (result) {
+        setGoogleUser(result.user);
+        setGoogleToken(result.accessToken);
+        setSyncStatusMsg({ type: 'success', text: `تم ربط حساب Google بنجاح: ${result.user.email} 🟢` });
+        
+        if (settings.spreadsheetId) {
+          setTimeout(() => {
+            syncLeadsToGoogleSheets(result.accessToken);
+          }, 800);
+        }
+      }
+    } catch (err: any) {
+      console.error('Failed to sign in to Google:', err);
+      setSyncStatusMsg({ type: 'error', text: `فشل الاتصال بـ Google: ${err.message || 'خطأ غير معروف'}` });
+    } finally {
+      setIsSheetsAuthLoading(false);
+    }
+  };
+
+  const handleDisconnectGoogle = async () => {
+    setIsSheetsAuthLoading(true);
+    try {
+      await sheetsLogout();
+      setGoogleUser(null);
+      setGoogleToken(null);
+      setSyncStatusMsg({ type: 'success', text: 'تم إلغاء ربط حساب Google بنجاح.' });
+    } catch (err: any) {
+      console.error('Failed to logout Google:', err);
+    } finally {
+      setIsSheetsAuthLoading(false);
     }
   };
 
@@ -357,39 +584,33 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
             >
               <ArrowLeft className="h-5 w-5 rtl:rotate-180" />
             </button>
-            <div>
-              <h1 className="text-xl font-bold font-sans text-natural-dark flex items-center gap-2">
-                <span>لوحة التحكم في المتجر</span>
-                <span className="bg-natural-cream text-natural-primary text-xs px-2.5 py-0.5 rounded-full font-semibold border border-natural-sand/50">التاجر 🔑</span>
-              </h1>
-              <p className="text-xs text-natural-dark/60">تتبع طلبات الزبناء، وتغيير ثمن واسم وصور المنتوج المعروض.</p>
-            </div>
+            {activeTab === 'orders' ? (
+              <div>
+                <h1 className="text-xl font-bold font-sans text-natural-dark flex items-center gap-2">
+                  <span>لوحة تتبع طلبات الزبناء</span>
+                  <span className="bg-emerald-50 text-emerald-700 text-xs px-2.5 py-0.5 rounded-full font-semibold border border-emerald-100 flex items-center gap-1">الطلبات 📦</span>
+                </h1>
+                <p className="text-xs text-natural-dark/60">تتبع طلبات الزبناء المستلمة في الوقت الفعلي وتحديث حالتها ومراسلتهم عبر الواتساب.</p>
+              </div>
+            ) : (
+              <div>
+                <h1 className="text-xl font-bold font-sans text-natural-dark flex items-center gap-2">
+                  <span>لوحة تعديل بيانات المنتج والمعرض</span>
+                  <span className="bg-natural-cream text-natural-primary text-xs px-2.5 py-0.5 rounded-full font-semibold border border-natural-sand/50 flex items-center gap-1">المتجر ⚙️</span>
+                </h1>
+                <p className="text-xs text-natural-dark/60">تعديل أثمنة وصور وخيارات الطاولة المعروضة في صفحة الهبوط.</p>
+              </div>
+            )}
           </div>
 
-          {/* Tab buttons */}
-          <div className="flex items-center gap-2 bg-natural-cream/50 p-1 rounded-xl border border-natural-sand/40 w-full md:w-auto justify-center">
+          {activeTab === 'orders' && (
             <button
-              onClick={() => setActiveTab('orders')}
-              className={`px-4 py-2 text-xs font-black rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${activeTab === 'orders' ? 'bg-natural-primary text-white shadow-md' : 'text-natural-dark/70 hover:bg-natural-sand/40'}`}
+              onClick={fetchLeads}
+              className="text-xs font-semibold px-3 py-2 bg-natural-cream hover:bg-natural-sand text-natural-primary rounded-lg border border-natural-sand/50 transition-colors cursor-pointer shrink-0"
             >
-              <ShoppingBag className="h-3.5 w-3.5" />
-              <span>الطلبات المستلمة ({leads.length})</span>
+              تحديث البيانات 🔄
             </button>
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`px-4 py-2 text-xs font-black rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${activeTab === 'settings' ? 'bg-natural-primary text-white shadow-md' : 'text-natural-dark/70 hover:bg-natural-sand/40'}`}
-            >
-              <Settings className="h-3.5 w-3.5" />
-              <span>تعديل المنتج ⚙️</span>
-            </button>
-          </div>
-
-          <button
-            onClick={fetchLeads}
-            className="text-xs font-semibold px-3 py-2 bg-natural-cream hover:bg-natural-sand text-natural-primary rounded-lg border border-natural-sand/50 transition-colors cursor-pointer shrink-0"
-          >
-            تحديث البيانات 🔄
-          </button>
+          )}
         </div>
       </header>
 
@@ -402,75 +623,140 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
           </div>
         )}
 
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <motion.div 
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="bg-natural-cream/35 p-5 rounded-2xl border border-natural-sand/60 shadow-xs flex items-center justify-between"
-          >
-            <div>
-              <p className="text-xs font-semibold text-natural-dark/65">إجمالي الطلبات</p>
-              <h3 className="text-2xl font-bold text-natural-dark mt-1 font-mono">{stats.total}</h3>
-              <p className="text-xs text-natural-dark/45 mt-0.5">عدد زبناء المهتمين</p>
-            </div>
-            <div className="h-12 w-12 bg-natural-cream rounded-xl flex items-center justify-center text-natural-primary border border-natural-sand/40">
-              <ShoppingBag className="h-6 w-6" />
-            </div>
-          </motion.div>
+        {/* Stats Grid - Only shown on orders page */}
+        {activeTab === 'orders' && (
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-natural-cream/35 p-5 rounded-2xl border border-natural-sand/60 shadow-xs flex items-center justify-between"
+            >
+              <div>
+                <p className="text-xs font-semibold text-natural-dark/65">إجمالي الطلبات</p>
+                <h3 className="text-2xl font-bold text-natural-dark mt-1 font-mono">{stats.total}</h3>
+                <p className="text-xs text-natural-dark/45 mt-0.5">عدد زبناء المهتمين</p>
+              </div>
+              <div className="h-12 w-12 bg-natural-cream rounded-xl flex items-center justify-center text-natural-primary border border-natural-sand/40">
+                <ShoppingBag className="h-6 w-6" />
+              </div>
+            </motion.div>
 
-          <motion.div 
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.05 }}
-            className="bg-natural-cream/35 p-5 rounded-2xl border border-natural-sand/60 shadow-xs flex items-center justify-between"
-          >
-            <div>
-              <p className="text-xs font-semibold text-natural-dark/65">الطلبات المؤكدة ✅</p>
-              <h3 className="text-2xl font-bold text-emerald-700 mt-1 font-mono">{stats.confirmed}</h3>
-              <p className="text-xs text-natural-dark/45 mt-0.5">جاهزة للتوصيل والشحن</p>
-            </div>
-            <div className="h-12 w-12 bg-emerald-50 rounded-xl flex items-center justify-center text-emerald-700 border border-emerald-100">
-              <CheckCircle className="h-6 w-6" />
-            </div>
-          </motion.div>
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05 }}
+              className="bg-natural-cream/35 p-5 rounded-2xl border border-natural-sand/60 shadow-xs flex items-center justify-between"
+            >
+              <div>
+                <p className="text-xs font-semibold text-natural-dark/65">الطلبات المؤكدة ✅</p>
+                <h3 className="text-2xl font-bold text-emerald-700 mt-1 font-mono">{stats.confirmed}</h3>
+                <p className="text-xs text-natural-dark/45 mt-0.5">جاهزة للتوصيل والشحن</p>
+              </div>
+              <div className="h-12 w-12 bg-emerald-50 rounded-xl flex items-center justify-center text-emerald-700 border border-emerald-100">
+                <CheckCircle className="h-6 w-6" />
+              </div>
+            </motion.div>
 
-          <motion.div 
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="bg-natural-cream/35 p-5 rounded-2xl border border-natural-sand/60 shadow-xs flex items-center justify-between"
-          >
-            <div>
-              <p className="text-xs font-semibold text-natural-dark/65">تحت الإجراء ⏳</p>
-              <h3 className="text-2xl font-bold text-blue-700 mt-1 font-mono">{stats.new + stats.contacted}</h3>
-              <p className="text-xs text-natural-dark/45 mt-0.5">{stats.new} جديدة و {stats.contacted} تم الاتصال بها</p>
-            </div>
-            <div className="h-12 w-12 bg-blue-50 rounded-xl flex items-center justify-center text-blue-700 border border-blue-100">
-              <Clock className="h-6 w-6" />
-            </div>
-          </motion.div>
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="bg-natural-cream/35 p-5 rounded-2xl border border-natural-sand/60 shadow-xs flex items-center justify-between"
+            >
+              <div>
+                <p className="text-xs font-semibold text-natural-dark/65">تحت الإجراء ⏳</p>
+                <h3 className="text-2xl font-bold text-blue-700 mt-1 font-mono">{stats.new + stats.contacted}</h3>
+                <p className="text-xs text-natural-dark/45 mt-0.5">{stats.new} جديدة و {stats.contacted} تم الاتصال بها</p>
+              </div>
+              <div className="h-12 w-12 bg-blue-50 rounded-xl flex items-center justify-center text-blue-700 border border-blue-100">
+                <Clock className="h-6 w-6" />
+              </div>
+            </motion.div>
 
-          <motion.div 
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.15 }}
-            className="bg-natural-cream/35 p-5 rounded-2xl border border-natural-sand/60 shadow-xs flex items-center justify-between"
-          >
-            <div>
-              <p className="text-xs font-semibold text-natural-dark/65">رقم المبيعات المتوقع</p>
-              <h3 className="text-2xl font-bold text-natural-primary mt-1 font-mono">{stats.potentialEarnings} <span className="text-xs">درهم</span></h3>
-              <p className="text-xs text-natural-dark/45 mt-0.5">بناءً على سعر {settings.price} درهم/طاولة</p>
-            </div>
-            <div className="h-12 w-12 bg-natural-cream rounded-xl flex items-center justify-center text-natural-accent border border-natural-sand/40">
-              <TrendingUp className="h-6 w-6" />
-            </div>
-          </motion.div>
-        </div>
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15 }}
+              className="bg-natural-cream/35 p-5 rounded-2xl border border-natural-sand/60 shadow-xs flex items-center justify-between"
+            >
+              <div>
+                <p className="text-xs font-semibold text-natural-dark/65">رقم المبيعات المتوقع</p>
+                <h3 className="text-2xl font-bold text-natural-primary mt-1 font-mono">{stats.potentialEarnings} <span className="text-xs">درهم</span></h3>
+                <p className="text-xs text-natural-dark/45 mt-0.5">بناءً على سعر {settings.price} درهم/طاولة</p>
+              </div>
+              <div className="h-12 w-12 bg-natural-cream rounded-xl flex items-center justify-center text-natural-accent border border-natural-sand/40">
+                <TrendingUp className="h-6 w-6" />
+              </div>
+            </motion.div>
+          </div>
+        )}
 
         {/* Conditional Content based on activeTab */}
         {activeTab === 'orders' ? (
           <>
+            {/* Google Sheets Sync Quick Bar */}
+            {settings.spreadsheetId && (
+              <div className="mb-6 bg-white border border-natural-sand/60 p-4 rounded-2xl shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="h-9 w-9 bg-emerald-50 rounded-xl flex items-center justify-center text-emerald-600 border border-emerald-100 shrink-0 text-sm">
+                    📊
+                  </div>
+                  <div className="text-right">
+                    <span className="text-xs font-black text-natural-dark block">مزامنة الطلبات مع Google Sheets</span>
+                    {googleUser ? (
+                      <span className="text-[10px] text-natural-dark/60 block">
+                        الجدول النشط: <a href={settings.spreadsheetUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline font-bold">{settings.spreadsheetName} 🔗</a>
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-amber-700 font-extrabold block">
+                        الرجاء ربط حساب Google لتفعيل المزامنة مع الجدول. ⚠️
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 w-full sm:w-auto shrink-0 justify-end">
+                  {leads.filter(l => !l.sheetSynced).length > 0 ? (
+                    <div className="text-xs font-bold text-amber-700 bg-amber-50 px-2.5 py-1.5 rounded-lg border border-amber-100 flex items-center gap-1.5">
+                      <span>{leads.filter(l => !l.sheetSynced).length} طلبات معلقة</span>
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+                    </div>
+                  ) : (
+                    <div className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1.5 rounded-lg border border-emerald-100 flex items-center gap-1.5">
+                      <span>كل الطلبات متزامنة</span>
+                      <span>✨</span>
+                    </div>
+                  )}
+
+                  {googleUser ? (
+                    <button
+                      onClick={() => syncLeadsToGoogleSheets()}
+                      disabled={isSyncingSheets || leads.filter(l => !l.sheetSynced).length === 0}
+                      className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-100 disabled:text-neutral-400 text-white text-xs px-4 py-2 rounded-xl font-extrabold shadow-sm hover:shadow-md transition-all cursor-pointer flex items-center gap-1.5"
+                    >
+                      {isSyncingSheets ? (
+                        <>
+                          <div className="animate-spin h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full"></div>
+                          <span>جاري المزامنة...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>مزامنة الآن 🔄</span>
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleConnectGoogle}
+                      className="bg-natural-primary hover:bg-natural-primary-dark text-white text-xs px-4 py-2 rounded-xl font-extrabold transition-all cursor-pointer"
+                    >
+                      ربط الحساب 🚀
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Filters and Search controls */}
             <div className="bg-natural-cream/25 p-4 rounded-2xl border border-natural-sand/60 shadow-xs mb-6 flex flex-col md:flex-row gap-4">
               {/* Search Box */}
@@ -591,7 +877,17 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
                       return (
                         <tr key={lead.id} className="hover:bg-natural-sand/10 transition-colors">
                           <td className="p-4">
-                            <div className="font-bold text-natural-dark">{lead.name}</div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-natural-dark">{lead.name}</span>
+                              {settings.spreadsheetId && (
+                                <span 
+                                  className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold ${lead.sheetSynced ? 'bg-emerald-50 text-emerald-600 border border-emerald-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}
+                                  title={lead.sheetSynced ? 'متزامن مع Google Sheets' : 'غير متزامن بعد'}
+                                >
+                                  {lead.sheetSynced ? ' Sheets ✅' : ' Sheets ⏳'}
+                                </span>
+                              )}
+                            </div>
                             <div className="text-xs text-natural-dark/50 flex items-center gap-1 mt-1 font-mono">
                               <Calendar className="h-3 w-3" />
                               {formatDate(lead.createdAt)}
@@ -702,9 +998,19 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
                           </span>
                         </div>
 
-                        <h4 className="font-bold text-natural-dark text-base flex items-center gap-2">
-                          <User className="h-4 w-4 text-natural-dark/40 shrink-0" />
-                          {lead.name}
+                        <h4 className="font-bold text-natural-dark text-base flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-2">
+                            <User className="h-4 w-4 text-natural-dark/40 shrink-0" />
+                            {lead.name}
+                          </span>
+                          {settings.spreadsheetId && (
+                            <span 
+                              className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold shrink-0 ${lead.sheetSynced ? 'bg-emerald-50 text-emerald-600 border border-emerald-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}
+                              title={lead.sheetSynced ? 'متزامن مع Google Sheets' : 'غير متزامن بعد'}
+                            >
+                              {lead.sheetSynced ? 'Sheets ✅' : 'Sheets ⏳'}
+                            </span>
+                          )}
                         </h4>
 
                         <div className="mt-2 space-y-1.5 text-xs text-natural-dark/70">
@@ -931,6 +1237,217 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
                     placeholder="مثال: 212612345678"
                   />
                   <p className="text-[10px] text-natural-dark/50">هذا الرقم غادي يخدم مباشرة فاش الزبون يضغط على زر "طلب سريع عبر الواتساب".</p>
+                </div>
+
+                {/* Merchant WhatsApp Notification settings */}
+                <div className="border-t border-natural-sand/30 pt-6 md:col-span-2 space-y-4">
+                  <h3 className="text-sm font-black text-natural-dark flex items-center gap-1.5 justify-start">
+                    <span>⚙️ إعدادات الإشعارات والطلب التلقائي عبر الواتساب للتاجر</span>
+                  </h3>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-extrabold text-natural-dark block">رقم هاتف استقبال الإشعارات (للتاجر) 📱</label>
+                      <input
+                        type="text"
+                        required
+                        value={settings.notificationWhatsapp || ''}
+                        onChange={(e) => setSettings({ ...settings, notificationWhatsapp: e.target.value.replace(/[^0-9]/g, '') })}
+                        className="w-full px-4 py-3 bg-natural-bg border border-natural-sand/60 rounded-xl text-sm focus:outline-none focus:border-natural-primary focus:bg-white transition-all text-natural-dark font-mono"
+                        placeholder="مثال: 212636415659"
+                      />
+                      <p className="text-[10px] text-natural-dark/50">هذا هو الرقم اللي غادي توصلك فيه الرسائل ديال الطلبات الجديدة (الافتراضي: 0636415659).</p>
+                    </div>
+
+                    <div className="space-y-1.5 flex flex-col justify-center">
+                      <label className="text-xs font-extrabold text-natural-dark block mb-2">طريقة الإرسال والتوجيه 🛠️</label>
+                      <label className="relative flex items-center gap-3 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={settings.enableAutoRedirect ?? true}
+                          onChange={(e) => setSettings({ ...settings, enableAutoRedirect: e.target.checked })}
+                          className="h-4 w-4 text-natural-primary border-natural-sand/60 rounded-md focus:ring-natural-primary cursor-pointer"
+                        />
+                        <div className="text-xs font-semibold text-natural-dark">
+                          توجيه تلقائي للزبون للواتساب بعد الضغط على "طلب الآن"
+                        </div>
+                      </label>
+                      <p className="text-[10px] text-natural-dark/50 rtl:mr-7 mt-1">عند تفعيلها، بمجرد ما يضغط الزبون على "اطلب الآن"، غادي يتم فتح محادثة مباشرة معك فيها تفاصيل الطلب كاملة.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Google Sheets Integration Section */}
+              <div className="border-t border-natural-sand/30 pt-6 mt-6 space-y-4">
+                <h3 className="text-sm font-black text-natural-dark flex items-center gap-1.5 justify-start">
+                  <span className="text-base">📊</span>
+                  <span>ربط ومزامنة الطلبات مع Google Sheets</span>
+                </h3>
+                <p className="text-xs text-natural-dark/65 text-right">
+                  هاد الخاصية كتمكنك باش توصل بجميع الطلبات الجديدة مباشرة فجدول بيانات Google Sheets ديالك بشكل تلقائي ومنظم.
+                </p>
+
+                <div className="bg-natural-cream/15 p-5 rounded-3xl border border-natural-sand/40 space-y-4">
+                  {/* Auth Connection Status Card */}
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-natural-sand/30 shadow-xs">
+                    <div className="flex items-center gap-3">
+                      <div className={`h-10 w-10 rounded-full flex items-center justify-center text-lg ${googleUser ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-neutral-50 text-neutral-400 border border-neutral-200'}`}>
+                        {googleUser ? '🟢' : '⚪'}
+                      </div>
+                      <div className="text-right col-reverse">
+                        <span className="text-xs font-extrabold text-natural-dark block">حالة الاتصال بـ Google</span>
+                        <span className="text-[11px] text-natural-dark/60 font-medium">
+                          {googleUser ? `متصل بحساب: ${googleUser.email}` : 'غير متصل بحساب Google حالياً'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {googleUser ? (
+                        <button
+                          type="button"
+                          onClick={handleDisconnectGoogle}
+                          disabled={isSheetsAuthLoading}
+                          className="bg-neutral-50 hover:bg-neutral-100 text-neutral-600 hover:text-red-600 border border-neutral-200 text-xs px-4 py-2 rounded-xl font-bold transition-all cursor-pointer flex items-center gap-1.5"
+                        >
+                          {isSheetsAuthLoading ? 'جاري إلغاء الربط...' : 'إلغاء ربط الحساب 🔌'}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleConnectGoogle}
+                          disabled={isSheetsAuthLoading}
+                          className="bg-natural-primary hover:bg-natural-primary-dark text-white text-xs px-5 py-2.5 rounded-xl font-black shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+                        >
+                          {isSheetsAuthLoading ? (
+                            <>
+                              <div className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></div>
+                              <span>جاري الاتصال...</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>ربط حساب Google 🚀</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Sync Status Info Message */}
+                  {syncStatusMsg && (
+                    <div className={`p-4 rounded-xl border flex items-center gap-3 text-xs font-bold ${syncStatusMsg.type === 'success' ? 'bg-emerald-50/50 border-emerald-200 text-emerald-800' : 'bg-red-50/50 border-red-200 text-red-800'}`}>
+                      <span>{syncStatusMsg.type === 'success' ? '✅' : '⚠️'}</span>
+                      <p className="flex-1">{syncStatusMsg.text}</p>
+                    </div>
+                  )}
+
+                  {/* Spreadsheet Settings & Configuration (Only available if logged in) */}
+                  {googleUser && (
+                    <div className="space-y-4 pt-2 border-t border-natural-sand/20 animate-fadeIn">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Create or view connected Spreadsheet */}
+                        <div className="md:col-span-2 bg-natural-cream/20 p-4 rounded-2xl border border-natural-sand/30 flex flex-col md:flex-row items-center justify-between gap-4">
+                          <div className="text-right flex-1">
+                            <span className="text-xs font-extrabold text-natural-dark block">جدول البيانات النشط (Active Spreadsheet)</span>
+                            {settings.spreadsheetId ? (
+                              <a
+                                href={settings.spreadsheetUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[11px] text-blue-600 hover:underline font-bold mt-1 inline-flex items-center gap-1"
+                              >
+                                <span>{settings.spreadsheetName || 'فتح جدول البيانات في نافذة جديدة'}</span>
+                                <span>🔗</span>
+                              </a>
+                            ) : (
+                              <span className="text-[11px] text-amber-700 font-bold block mt-1">
+                                لم تقم بإنشاء جدول بيانات حتى الآن. اضغط على الزر لإنشاء جدول منظم بشكل تلقائي.
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="shrink-0 flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleCreateNewSpreadsheet}
+                              disabled={isSheetsAuthLoading}
+                              className="bg-white hover:bg-neutral-50 text-natural-dark border border-natural-sand/60 text-xs px-4 py-2.5 rounded-xl font-bold transition-all cursor-pointer flex items-center gap-1.5"
+                            >
+                              {settings.spreadsheetId ? 'إنشاء جدول مبيعات جديد 📊' : 'إنشاء جدول مبيعات تلقائي 📊'}
+                            </button>
+
+                            {settings.spreadsheetId && (
+                              <button
+                                type="button"
+                                onClick={() => syncLeadsToGoogleSheets()}
+                                disabled={isSyncingSheets}
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-4 py-2.5 rounded-xl font-black shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+                              >
+                                {isSyncingSheets ? (
+                                  <>
+                                    <div className="animate-spin h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full"></div>
+                                    <span>جاري المزامنة...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span>مزامنة الطلبات المعلقة 🔄</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Manual entry for advanced users */}
+                        <div className="space-y-1.5 md:col-span-2">
+                          <label className="text-xs font-extrabold text-natural-dark block">مُعرف جدول البيانات الحالي (Spreadsheet ID)</label>
+                          <input
+                            type="text"
+                            value={settings.spreadsheetId || ''}
+                            onChange={(e) => setSettings({ ...settings, spreadsheetId: e.target.value })}
+                            className="w-full px-4 py-3 bg-white border border-natural-sand/60 rounded-xl text-xs focus:outline-none focus:border-natural-primary transition-all text-left font-mono text-natural-dark"
+                            placeholder="مثال: 1a2B3c4D5e..."
+                          />
+                          <p className="text-[10px] text-natural-dark/50">هذا هو المعرف الفريد الخاص بـ Google Sheet للطلبات.</p>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-extrabold text-natural-dark block">اسم جدول البيانات</label>
+                          <input
+                            type="text"
+                            value={settings.spreadsheetName || ''}
+                            onChange={(e) => setSettings({ ...settings, spreadsheetName: e.target.value })}
+                            className="w-full px-4 py-3 bg-white border border-natural-sand/60 rounded-xl text-xs focus:outline-none focus:border-natural-primary transition-all text-natural-dark"
+                            placeholder="مثال: مبيعات طاولة ميني MDF"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-extrabold text-natural-dark block">رابط جدول البيانات (Spreadsheet URL)</label>
+                          <input
+                            type="text"
+                            value={settings.spreadsheetUrl || ''}
+                            onChange={(e) => setSettings({ ...settings, spreadsheetUrl: e.target.value })}
+                            className="w-full px-4 py-3 bg-white border border-natural-sand/60 rounded-xl text-xs focus:outline-none focus:border-natural-primary transition-all text-left font-mono text-natural-dark"
+                            placeholder="https://docs.google.com/spreadsheets/d/..."
+                          />
+                        </div>
+                      </div>
+
+                      {/* Sync Status Badge */}
+                      <div className="p-3.5 bg-natural-cream/30 rounded-2xl border border-natural-sand/30 flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-natural-dark/70">حالة المزامنة الحالية:</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-natural-dark">
+                            {leads.filter(l => !l.sheetSynced).length} طلبات جديدة معلقة لم يتم مزامنتها بعد.
+                          </span>
+                          <span className="h-2 w-2 rounded-full bg-amber-500 animate-ping"></span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1215,6 +1732,64 @@ export default function AdminPanel({ onBack }: AdminPanelProps) {
           </motion.div>
         )}
       </main>
+
+      {/* Real-time In-App Order Notification Toast */}
+      <AnimatePresence>
+        {newOrderAlert && (
+          <motion.div
+            initial={{ opacity: 0, y: -50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9, y: -20 }}
+            className="fixed top-6 left-6 z-50 max-w-sm w-full bg-white border-2 border-emerald-500 shadow-2xl rounded-2xl p-4 flex flex-col gap-3 overflow-hidden text-right rtl"
+            dir="rtl"
+          >
+            {/* Pulse line decoration */}
+            <div className="absolute top-0 right-0 left-0 h-1.5 bg-emerald-500" />
+            
+            <div className="flex items-start gap-3">
+              <div className="h-10 w-10 shrink-0 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-600 border border-emerald-100">
+                <ShoppingBag className="h-5 w-5 animate-bounce" />
+              </div>
+              <div className="flex-1 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-100 flex items-center gap-1">طلب جديد مكتمل! 📦</span>
+                  <button 
+                    onClick={() => setNewOrderAlert(null)}
+                    className="text-neutral-400 hover:text-neutral-600 p-1 rounded-lg hover:bg-neutral-100 transition-colors cursor-pointer"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <h4 className="text-sm font-black text-neutral-800">وصلك طلب جديد من {newOrderAlert.name}!</h4>
+                <p className="text-xs text-neutral-500 leading-relaxed">
+                  من مدينة {newOrderAlert.city} • {newOrderAlert.tableType} (الكمية: {newOrderAlert.quantity || 1})
+                </p>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-2 justify-end border-t border-neutral-100 pt-2.5 mt-1">
+              <button
+                onClick={() => {
+                  setSearchTerm(newOrderAlert.name);
+                  setStatusFilter('all');
+                  setCityFilter('all');
+                  setActiveTab('orders');
+                  setNewOrderAlert(null);
+                }}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition-all shadow-xs cursor-pointer"
+              >
+                عرض الطلب وتتبعه 🔍
+              </button>
+              <button
+                onClick={() => setNewOrderAlert(null)}
+                className="bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-semibold text-xs px-3 py-2 rounded-xl transition-all cursor-pointer"
+              >
+                إغلاق ❌
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

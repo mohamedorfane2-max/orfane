@@ -21,6 +21,11 @@ export const defaultSettings = {
   price: 199,
   originalPrice: 299,
   whatsappNumber: "212600000000",
+  notificationWhatsapp: "212636415659",
+  enableAutoRedirect: true,
+  spreadsheetId: "",
+  spreadsheetName: "",
+  spreadsheetUrl: "",
   image_natural: "/src/assets/images/table_colors_1783722948300.jpg",
   image_dark: "/src/assets/images/hero_table_1783722935630.jpg",
   image_white: "/src/assets/images/table_utility_1783722963162.jpg",
@@ -284,4 +289,28 @@ export const subscribeLeads = (
       onError(e);
     }
   });
+};
+
+export const markLeadAsSynced = async (id: string): Promise<boolean> => {
+  try {
+    const docRef = doc(db, 'leads', id);
+    await updateDoc(docRef, { sheetSynced: true });
+    return true;
+  } catch (err) {
+    console.error('Error marking lead as synced in Firestore:', err);
+    return false;
+  }
+};
+
+export const markMultipleLeadsAsSynced = async (ids: string[]): Promise<boolean> => {
+  try {
+    for (const id of ids) {
+      const docRef = doc(db, 'leads', id);
+      await updateDoc(docRef, { sheetSynced: true });
+    }
+    return true;
+  } catch (err) {
+    console.error('Error marking multiple leads as synced:', err);
+    return false;
+  }
 };
