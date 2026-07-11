@@ -1,0 +1,6 @@
+{
+  "name": "MDF Tables Landing Page",
+  "description": "A high-converting, responsive Moroccan Darija landing page for selling elegant mini MDF tables, featuring a lead-capture form and a direct WhatsApp contact integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
